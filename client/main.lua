@@ -170,6 +170,7 @@ end)
 
 RegisterNetEvent('qb-inventory:client:openInventory', function(items, other)
     SetNuiFocus(true, true)
+    TriggerScreenblurFadeIn(250)
     SendNUIMessage({
         action = 'open',
         inventory = items,
@@ -201,6 +202,7 @@ end)
 
 RegisterNUICallback('CloseInventory', function(data, cb)
     SetNuiFocus(false, false)
+    TriggerScreenblurFadeOut(250)
     if data.name then
         if data.name:find('trunk-') then
             CloseTrunk()

@@ -1,3 +1,6 @@
+let inventoryAudioContext = null;
+let inventoryAudioWarningShown = false;
+
 const InventoryContainer = Vue.createApp({
     data() {
         return this.getInitialState();
@@ -41,6 +44,26 @@ const InventoryContainer = Vue.createApp({
                 return "high";
             }
         },
+        menuQty() {
+            const max = this.contextMenuItem ? this.contextMenuItem.amount : 1;
+            return Math.min(Math.max(parseInt(this.menuAmount) || 1, 1), max);
+        },
+        playerPct() {
+            return Math.min((this.playerWeight / this.maxWeight) * 100, 100) || 0;
+        },
+        otherPct() {
+            return Math.min((this.otherInventoryWeight / this.otherInventoryMaxWeight) * 100, 100) || 0;
+        },
+        hotCount() {
+            return [1, 2, 3, 4, 5].filter((s) => this.playerInventory[s]).length;
+        },
+        emptyAttachmentSlots() {
+            const n = this.selectedWeaponAttachments.length;
+            return Math.max(4, Math.ceil(n / 4) * 4) - n;
+        },
+        primarySlots() {
+            return Array.from({ length: Math.max(this.totalSlots - 5, 0) }, (_, i) => i + 6);
+        },
         shouldCenterInventory() {
             return this.isOtherInventoryEmpty;
         },
@@ -58,6 +81,8 @@ const InventoryContainer = Vue.createApp({
                 totalSlots: 0,
                 // Escape Key
                 isInventoryOpen: false,
+                isStandalonePreview: false,
+                previewOtherInventory: [],
                 // Single pane
                 isOtherInventoryEmpty: true,
                 // Error handling
@@ -80,6 +105,7 @@ const InventoryContainer = Vue.createApp({
                 contextMenuPosition: { top: "0px", left: "0px" },
                 contextMenuItem: null,
                 showSubmenu: false,
+                menuAmount: 1,
                 // Hotbar
                 showHotbar: false,
                 hotbarItems: [],
@@ -96,6 +122,8 @@ const InventoryContainer = Vue.createApp({
                 selectedWeapon: null,
                 showWeaponAttachments: false,
                 selectedWeaponAttachments: [],
+                attachmentsLoading: false,
+                attachmentBusy: false,
                 // Dragging and dropping
                 currentlyDraggingItem: null,
                 currentlyDraggingSlot: null,
@@ -111,6 +139,9 @@ const InventoryContainer = Vue.createApp({
                 this.toggleHotbar(false);
             }
 
+            if (!this.isStandalonePreview) {
+                this.playInventorySound("open");
+            }
             this.isInventoryOpen = true;
             this.maxWeight = data.maxweight;
             this.totalSlots = data.slots;
@@ -208,6 +239,9 @@ const InventoryContainer = Vue.createApp({
                 this.inventoryError(data.errorSlot, data.errorInventory); // pass from inventory for from errors
         },
         async closeInventory() {
+            if (this.isInventoryOpen) {
+                this.playInventorySound("close");
+            }
             this.clearDragData();
             let inventoryName = this.otherInventoryName;
             Object.assign(this, this.getInitialState());
@@ -218,7 +252,87 @@ const InventoryContainer = Vue.createApp({
             }
         },
         clearTransferAmount() {
+            this.playInventorySound("click");
             this.transferAmount = null;
+        },
+        playInventorySound(sound) {
+            const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+            if (!AudioContextConstructor) {
+                if (!inventoryAudioWarningShown) {
+                    console.warn("Inventory sounds are unavailable because Web Audio is not supported.");
+                    inventoryAudioWarningShown = true;
+                }
+                return;
+            }
+
+            const sounds = {
+                open: [
+                    { frequency: 523.25, offset: 0, duration: 0.12 },
+                    { frequency: 659.25, offset: 0.055, duration: 0.14 },
+                    { frequency: 783.99, offset: 0.11, duration: 0.17 },
+                ],
+                close: [
+                    { frequency: 783.99, offset: 0, duration: 0.11 },
+                    { frequency: 659.25, offset: 0.055, duration: 0.12 },
+                    { frequency: 523.25, offset: 0.11, duration: 0.15 },
+                ],
+                click: [{ frequency: 720, offset: 0, duration: 0.045 }],
+                move: [
+                    { frequency: 440, offset: 0, duration: 0.09 },
+                    { frequency: 587.33, offset: 0.045, duration: 0.11 },
+                ],
+                drop: [
+                    { frequency: 392, offset: 0, duration: 0.1 },
+                    { frequency: 523.25, offset: 0.055, duration: 0.12 },
+                ],
+                purchase: [
+                    { frequency: 587.33, offset: 0, duration: 0.1 },
+                    { frequency: 739.99, offset: 0.06, duration: 0.11 },
+                    { frequency: 880, offset: 0.12, duration: 0.15 },
+                ],
+                use: [
+                    { frequency: 659.25, offset: 0, duration: 0.09 },
+                    { frequency: 783.99, offset: 0.05, duration: 0.1 },
+                    { frequency: 987.77, offset: 0.1, duration: 0.14 },
+                ],
+            };
+            const notes = sounds[sound];
+            if (!notes) return;
+
+            try {
+                if (!inventoryAudioContext) {
+                    inventoryAudioContext = new AudioContextConstructor();
+                }
+                if (inventoryAudioContext.state === "suspended") {
+                    inventoryAudioContext.resume().catch((error) => {
+                        if (!inventoryAudioWarningShown) {
+                            console.warn("Unable to resume inventory sounds:", error);
+                            inventoryAudioWarningShown = true;
+                        }
+                    });
+                }
+
+                const now = inventoryAudioContext.currentTime;
+                notes.forEach(({ frequency, offset, duration }) => {
+                    const oscillator = inventoryAudioContext.createOscillator();
+                    const gain = inventoryAudioContext.createGain();
+                    const start = now + offset;
+                    oscillator.type = "sine";
+                    oscillator.frequency.setValueAtTime(frequency, start);
+                    gain.gain.setValueAtTime(0.0001, start);
+                    gain.gain.exponentialRampToValueAtTime(0.04, start + 0.012);
+                    gain.gain.exponentialRampToValueAtTime(0.0001, start + duration);
+                    oscillator.connect(gain);
+                    gain.connect(inventoryAudioContext.destination);
+                    oscillator.start(start);
+                    oscillator.stop(start + duration);
+                });
+            } catch (error) {
+                if (!inventoryAudioWarningShown) {
+                    console.warn("Unable to play inventory sounds:", error);
+                    inventoryAudioWarningShown = true;
+                }
+            }
         },
         getItemInSlot(slot, inventoryType) {
             if (inventoryType === "player") {
@@ -230,6 +344,23 @@ const InventoryContainer = Vue.createApp({
         },
         getHotbarItemInSlot(slot) {
             return this.hotbarItems[slot - 1] || null;
+        },
+        togglePreviewOtherInventory() {
+            if (!this.isStandalonePreview) return;
+
+            this.playInventorySound("click");
+            if (this.isOtherInventoryEmpty) {
+                this.otherInventory = Object.fromEntries(this.previewOtherInventory.map((item) => [item.slot, item]));
+                this.otherInventoryName = "preview-stash";
+                this.otherInventoryLabel = "Storage";
+                this.otherInventoryMaxWeight = 50000;
+                this.otherInventorySlots = 20;
+                this.isShopInventory = false;
+                this.isOtherInventoryEmpty = false;
+            } else {
+                this.otherInventory = {};
+                this.isOtherInventoryEmpty = true;
+            }
         },
         containerMouseDownAction(event) {
             if (event.button === 0 && this.showContextMenu) {
@@ -332,6 +463,7 @@ const InventoryContainer = Vue.createApp({
             if (!item) return;
             const slotElement = event.target.closest(".item-slot");
             if (!slotElement) return;
+            this.playInventorySound("click");
             const ghostElement = this.createGhostElement(slotElement);
             document.body.appendChild(ghostElement);
             const offsetX = ghostElement.offsetWidth / 2;
@@ -364,12 +496,17 @@ const InventoryContainer = Vue.createApp({
             this.ghostElement.style.left = `${centeredX}px`;
             this.ghostElement.style.top = `${centeredY}px`;
         },
+        dbl(slot) {
+            const item = this.playerInventory[slot];
+            if (item) this.useItem(item);
+        },
         endDrag(event) {
             if (!this.currentlyDraggingItem) {
                 return;
             }
 
             const elementsUnderCursor = document.elementsFromPoint(event.clientX, event.clientY);
+
 
             const playerSlotElement = elementsUnderCursor.find((el) => el.classList.contains("item-slot") && el.closest(".player-inventory-section"));
 
@@ -436,6 +573,7 @@ const InventoryContainer = Vue.createApp({
                         this.otherInventoryName = response.data;
                         this.otherInventoryLabel = response.data;
                         this.isOtherInventoryEmpty = false;
+                        this.playInventorySound("drop");
                         this.clearDragData();
                     }
                 } catch (error) {
@@ -570,6 +708,7 @@ const InventoryContainer = Vue.createApp({
                     if (sourceItem.amount <= 0) {
                         delete sourceInventory[sourceSlot];
                     }
+                    this.playInventorySound("purchase");
                 } else {
                     this.inventoryError(sourceSlot, "other");
                 }
@@ -625,6 +764,7 @@ const InventoryContainer = Vue.createApp({
                             this.otherInventoryName = response.data;
                             this.otherInventoryLabel = response.data;
                             this.isOtherInventoryEmpty = false;
+                            this.playInventorySound("drop");
                         }
                     } catch (error) {
                         this.inventoryError(item.slot);
@@ -644,6 +784,7 @@ const InventoryContainer = Vue.createApp({
                         inventory: "player",
                         item: item,
                     });
+                    this.playInventorySound("use");
                     if (item.shouldClose) {
                         this.closeInventory();
                     }
@@ -683,6 +824,7 @@ const InventoryContainer = Vue.createApp({
                         this.playerInventory[newItemKey] = newItem;
                     }
                     item.amount--;
+                    this.playInventorySound("move");
 
                     if (item.amount <= 0) {
                         const itemKey = Object.keys(this.otherInventory).find((key) => this.otherInventory[key] === item);
@@ -691,8 +833,12 @@ const InventoryContainer = Vue.createApp({
                         }
                     }
                 }
-                const menuLeft = event.clientX;
-                const menuTop = event.clientY;
+                if (item.inventory !== "other") {
+                    this.playInventorySound("click");
+                }
+                const menuLeft = Math.min(event.clientX, window.innerWidth - window.innerHeight * 0.5);
+                const menuTop = Math.min(event.clientY, window.innerHeight - window.innerHeight * 0.5);
+                this.menuAmount = 1;
                 this.showContextMenu = true;
                 this.contextMenuPosition = {
                     top: `${menuTop}px`,
@@ -837,75 +983,104 @@ const InventoryContainer = Vue.createApp({
             if (!this.contextMenuItem) {
                 return;
             }
-            if (!this.showWeaponAttachments) {
-                this.selectedWeapon = this.contextMenuItem;
-                this.showWeaponAttachments = true;
-                axios
-                    .post("https://qb-inventory/GetWeaponData", JSON.stringify({ weapon: this.selectedWeapon.name, ItemData: this.selectedWeapon }))
-                    .then((response) => {
-                        const data = response.data;
-                        if (data.AttachmentData !== null && data.AttachmentData !== undefined) {
-                            if (data.AttachmentData.length > 0) {
-                                this.selectedWeaponAttachments = data.AttachmentData;
-                            }
-                        }
-                    })
-                    .catch((error) => {
-                        console.error(error);
-                    });
-            } else {
-                this.showWeaponAttachments = false;
-                this.selectedWeapon = null;
-                this.selectedWeaponAttachments = [];
+            this.selectedWeapon = this.contextMenuItem;
+            this.selectedWeaponAttachments = [];
+            this.attachmentsLoading = true;
+            this.showContextMenu = false;
+            this.showWeaponAttachments = true;
+            if (this.isStandalonePreview) {
+                this.selectedWeaponAttachments = [
+                    { attachment: "pistol_extendedclip", label: "Extended Clip" },
+                    { attachment: "pistol_flashlight", label: "Flashlight" },
+                    { attachment: "pistol_suppressor", label: "Suppressor" },
+                ];
+                this.attachmentsLoading = false;
+                return;
             }
+            axios
+                .post("https://qb-inventory/GetWeaponData", JSON.stringify({ weapon: this.selectedWeapon.name, ItemData: this.selectedWeapon }))
+                .then((response) => {
+                    const list = response.data && response.data.AttachmentData;
+                    this.selectedWeaponAttachments = Array.isArray(list) ? list : [];
+                })
+                .catch((error) => {
+                    console.error(error);
+                })
+                .finally(() => {
+                    this.attachmentsLoading = false;
+                });
+        },
+        closeWeaponAttachments() {
+            this.showWeaponAttachments = false;
+            this.selectedWeapon = null;
+            this.selectedWeaponAttachments = [];
+            this.attachmentBusy = false;
+        },
+        attachmentLabel(a) {
+            if (a.label) return a.label;
+            return String(a.attachment || "")
+                .replace(/_/g, " ")
+                .replace(/\b\w/g, (c) => c.toUpperCase());
         },
         removeAttachment(attachment) {
-            if (!this.selectedWeapon) {
+            if (!this.selectedWeapon || this.attachmentBusy) {
                 return;
             }
             const index = this.selectedWeaponAttachments.indexOf(attachment);
-            if (index !== -1) {
-                this.selectedWeaponAttachments.splice(index, 1);
+            if (this.isStandalonePreview) {
+                if (index !== -1) this.selectedWeaponAttachments.splice(index, 1);
+                return;
             }
+            this.attachmentBusy = true;
             axios
                 .post("https://qb-inventory/RemoveAttachment", JSON.stringify({ AttachmentData: attachment, WeaponData: this.selectedWeapon }))
                 .then((response) => {
-                    this.selectedWeapon = response.data.WeaponData;
-                    if (response.data.Attachments) {
-                        this.selectedWeaponAttachments = response.data.Attachments;
+                    const data = response.data || {};
+                    if (data.WeaponData) this.selectedWeapon = data.WeaponData;
+                    if (Array.isArray(data.Attachments)) {
+                        this.selectedWeaponAttachments = data.Attachments;
+                    } else if (index !== -1) {
+                        this.selectedWeaponAttachments.splice(index, 1);
                     }
-                    const nextSlot = this.findNextAvailableSlot(this.playerInventory);
-                    if (nextSlot !== null) {
-                        response.data.itemInfo.amount = 1;
-                        this.playerInventory[nextSlot] = response.data.itemInfo;
+                    if (data.itemInfo) {
+                        const nextSlot = this.findNextAvailableSlot(this.playerInventory);
+                        if (nextSlot !== null) {
+                            data.itemInfo.amount = 1;
+                            this.playerInventory[nextSlot] = data.itemInfo;
+                        }
                     }
                 })
                 .catch((error) => {
                     console.error(error);
-                    this.selectedWeaponAttachments.splice(index, 0, attachment);
+                })
+                .finally(() => {
+                    this.attachmentBusy = false;
                 });
         },
         generateTooltipContent(item) {
-            if (!item) {
-                return "";
-            }
-            let content = `<div class="custom-tooltip"><div class="tooltip-header">${item.label}</div><hr class="tooltip-divider">`;
-            const description = item.info && item.info.description ? item.info.description.replace(/\n/g, "<br>") : item.description ? item.description.replace(/\n/g, "<br>") : "No description available.";
-            if (item.info && Object.keys(item.info).length > 0 && item.info.display !== false) {
-                for (const [key, value] of Object.entries(item.info)) {
-                    if (key !== "description" && key !== "display") {
-                        let valueStr = value;
-                        if (key === "attachments") {
-                            valueStr = Object.keys(value).length > 0 ? "true" : "false";
-                        }
-                        content += `<div class="tooltip-info"><span class="tooltip-info-key">${this.formatKey(key)}:</span> ${valueStr}</div>`;
-                    }
+            if (!item) return "";
+            const info = item.info || {};
+            const desc = info.description || item.description || "No description available.";
+            const segments = (value, max) => {
+                let on = value > 0 ? Math.max(1, Math.round(Math.min(value / max, 1) * 10)) : 0;
+                return Array.from({ length: 10 }, (_, i) => `<i class="${i < on ? "on" : ""}"></i>`).join("");
+            };
+            const bar = (label, value, max) => `<div class="tt-label">${label}</div><div class="tt-bar">${segments(value, max)}</div>`;
+            const hidden = ["description", "display", "quality", "ammo", "clipSize", "maxAmmo"];
+            let bars = "";
+            if (info.quality !== undefined) bars += bar("Durability", info.quality, 100);
+            if (info.ammo !== undefined) bars += bar("Clip", info.ammo, info.clipSize || info.maxAmmo || 30);
+            let rows = "";
+            if (info.display !== false) {
+                for (const [key, value] of Object.entries(info)) {
+                    if (hidden.includes(key)) continue;
+                    const val = key === "attachments" ? (Object.keys(value).length > 0 ? "true" : "false") : value;
+                    rows += `<div class="tt-row"><span>${this.formatKey(key)}</span><b>${val}</b></div>`;
                 }
             }
-            content += `<div class="tooltip-description">${description}</div>`;
-            content += `<div class="tooltip-weight"><i class="fas fa-weight-hanging"></i> ${item.weight !== undefined && item.weight !== null ? (item.weight / 1000).toFixed(1) : "N/A"}kg</div>`;
-            content += `</div>`;
-            return content;
+            const type = (item.type || "item").replace(/^./, (c) => c.toUpperCase());
+            const weight = item.weight !== undefined && item.weight !== null ? " &middot; " + (item.weight / 1000).toFixed(1) + "kg" : "";
+            return `<div class="tt"><div class="tt-top"><div><div class="tt-name">${item.label}</div><div class="tt-sub">${type}${weight}</div></div><span class="tt-caret">&#9650;</span></div>${bars}${rows}<div class="tt-desc">${desc.replace(/\n/g, "<br>")}</div></div>`;
         },
         formatKey(key) {
             return key.replace(/_/g, " ").charAt(0).toUpperCase() + key.slice(1);
@@ -924,6 +1099,7 @@ const InventoryContainer = Vue.createApp({
                     toAmount,
                 })
                 .then((response) => {
+                    this.playInventorySound("move");
                     this.clearDragData();
                 })
                 .catch((error) => {
@@ -935,6 +1111,11 @@ const InventoryContainer = Vue.createApp({
         window.addEventListener("keydown", (event) => {
             const key = event.key;
             if (key === "Escape" || key === "Tab") {
+                if (this.showWeaponAttachments) {
+                    event.preventDefault();
+                    this.closeWeaponAttachments();
+                    return;
+                }
                 if (this.isInventoryOpen) {
                     this.closeInventory();
                 }
@@ -965,6 +1146,31 @@ const InventoryContainer = Vue.createApp({
                     console.warn(`Unexpected action: ${event.data.action}`);
             }
         });
+
+        if (typeof GetParentResourceName !== "function") {
+            document.body.classList.add("inventory-preview");
+            this.isStandalonePreview = true;
+            this.previewOtherInventory = [
+                { name: "advancedlockpick", label: "Advanced Lockpick", amount: 1, type: "item", slot: 2, weight: 500, image: "advancedlockpick.png", info: {}, useable: true },
+                { name: "armor", label: "Armor", amount: 2, type: "item", slot: 5, weight: 5000, image: "armor.png", info: {}, useable: true },
+                { name: "radio", label: "Radio", amount: 1, type: "item", slot: 8, weight: 1000, image: "radio.png", info: {}, useable: true },
+            ];
+            this.openInventory({
+                maxweight: 120000,
+                slots: 40,
+                inventory: [
+                    { name: "water_bottle", label: "Water", amount: 3, type: "item", slot: 1, weight: 500, image: "water_bottle.png", info: {}, useable: true },
+                    { name: "sandwich", label: "Sandwich", amount: 2, type: "item", slot: 2, weight: 200, image: "sandwich.png", info: {}, useable: true },
+                    { name: "phone", label: "Phone", amount: 1, type: "item", slot: 3, weight: 700, image: "phone.png", info: {}, useable: true },
+                    { name: "bandage", label: "Bandage", amount: 5, type: "item", slot: 4, weight: 100, image: "bandage.png", info: {}, useable: true },
+                    { name: "weapon_pistol", label: "Pistol", amount: 1, type: "weapon", slot: 5, weight: 1000, image: "weapon_pistol.png", info: { quality: 86, ammo: 18, serie: "PREVIEW-001" }, useable: false },
+                    { name: "pistol_ammo", label: "Pistol Ammo", amount: 24, type: "item", slot: 6, weight: 10, image: "pistol_ammo.png", info: {}, useable: true },
+                    { name: "repairkit", label: "Repair Kit", amount: 1, type: "item", slot: 9, weight: 2500, image: "repairkit.png", info: {}, useable: true },
+                    { name: "lockpick", label: "Lockpick", amount: 2, type: "item", slot: 12, weight: 300, image: "lockpick.png", info: {}, useable: true },
+                ],
+            });
+            this.inventoryLabel = "Player";
+        }
     },
     beforeUnmount() {
         window.removeEventListener("mousemove", () => {});
@@ -973,5 +1179,36 @@ const InventoryContainer = Vue.createApp({
     },
 });
 
+const ICONS = {
+    hand: '<path d="M18 11V6a2 2 0 0 0-4 0M14 10V4a2 2 0 0 0-4 0v2M10 10.5V6a2 2 0 0 0-4 0v8M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-6-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/>',
+    backpack: '<path d="M4 10a4 4 0 0 1 4-4h8a4 4 0 0 1 4 4v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2zM9 6V4a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2M8 21v-5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v5M8 10h8"/>',
+    box: '<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16zM3.3 7 12 12l8.7-5M12 22V12"/>',
+    ground: '<path d="M12 3v12m0 0-4-4m4 4 4-4M4 20h16"/>',
+    bag: '<path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4zM3 6h18M16 10a4 4 0 0 1-8 0"/>',
+    grid: '<path d="M4 4h6v6H4zM14 4h6v6h-6zM4 14h6v6H4zM14 14h6v6h-6z"/>',
+    lock: '<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
+};
+InventoryContainer.component("ico", {
+    props: ["name"],
+    computed: {
+        paths() {
+            return ICONS[this.name] || "";
+        },
+    },
+    template: `<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" v-html="paths"></svg>`,
+});
+InventoryContainer.component("inv-slot", {
+    props: ["item", "keyNum", "shop"],
+    template: `<div class="item-slot" :class="{ filled: item }">
+        <div class="item-slot-key" v-if="keyNum"><p>{{ keyNum }}</p></div>
+        <template v-if="item">
+            <div class="item-slot-img"><img :src="'images/' + item.image" alt="" /></div>
+            <span class="slot-weight">{{ ((item.weight || 0) * item.amount / 1000).toFixed(1) }}kg</span>
+            <div class="item-slot-amount"><p>x{{ item.amount }}</p></div>
+            <div class="item-price" v-if="shop"><p>\${{ item.price }}</p></div>
+            <div class="item-slot-durability"><div class="item-slot-durability-fill" :style="{ width: item.info && 'quality' in item.info ? item.info.quality + '%' : '0%' }" :class="item.info && item.info.quality > 75 ? 'high' : item.info && item.info.quality > 25 ? 'medium' : 'low'"></div></div>
+        </template>
+    </div>`,
+});
 InventoryContainer.use(FloatingVue);
 InventoryContainer.mount("#app");
